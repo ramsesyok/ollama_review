@@ -22,7 +22,7 @@ THE SOFTWARE.
 package cmd
 
 import (
-	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -47,9 +47,8 @@ AI によるレビュー結果を出力するツールです。`,
 
 // Execute は rootCmd にサブコマンドを登録して実行する
 func Execute() {
-	err := rootCmd.Execute()
-	if err != nil {
-		os.Exit(1)
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatalf("command failed: %v", err)
 	}
 }
 
@@ -84,6 +83,6 @@ func initConfig() {
 
 	// 設定ファイルが存在する場合は読み込む
 	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+		log.Printf("Using config file: %s", viper.ConfigFileUsed())
 	}
 }
