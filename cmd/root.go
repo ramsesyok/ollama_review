@@ -41,7 +41,7 @@ var rootCmd = &cobra.Command{
 AI によるレビュー結果を出力するツールです。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		output := viper.GetString("output")
-		Review(repository, output)
+		cobra.CheckErr(Review(repository, output))
 	},
 }
 
