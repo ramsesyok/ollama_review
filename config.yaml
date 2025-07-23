@@ -1,0 +1,7 @@
+model: codellama:13b
+guideline: guidelines.md
+exclude:
+  - "tests"
+  - "third_party"
+output: code_review.md
+ollamaHost: http://localhost:11434

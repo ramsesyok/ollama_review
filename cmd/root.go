@@ -24,12 +24,14 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var cfgFile string
+var repository string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -43,7 +45,10 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
+	Run: func(cmd *cobra.Command, args []string) {
+		output := viper.GetString("output")
+		Review(repository, output)
+	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -62,11 +67,11 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.ollama_review.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "config.yaml", "config file (default is config.yaml)")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.Flags().StringVarP(&repository, "repository", "r", "", "Select code review targets.")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -76,11 +81,12 @@ func initConfig() {
 		viper.SetConfigFile(cfgFile)
 	} else {
 		// Find home directory.
-		home, err := os.UserHomeDir()
+		exec, err := os.Executable()
 		cobra.CheckErr(err)
+		exeDir := filepath.Dir(exec)
 
 		// Search config in home directory with name ".ollama_review" (without extension).
-		viper.AddConfigPath(home)
+		viper.AddConfigPath(exeDir)
 		viper.SetConfigType("yaml")
 		viper.SetConfigName(".ollama_review")
 	}
