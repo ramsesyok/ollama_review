@@ -145,6 +145,51 @@ func reviewChunk(client *api.Client, model string, guideline string, lang string
 	return outBuf.String(), nil
 }
 
+// processFile は単一ファイルを解析してレビュー結果を report に追記するヘルパー。
+func processFile(path string, report *[]string, model, guidelinePath string) error {
+	ext := filepath.Ext(path)
+	cfg, ok := langConfig[ext]
+	if !ok {
+		return nil
+	}
+	log.Printf("Processing %s", path)
+
+	src, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("Read error %s: %v", path, err)
+		return nil
+	}
+	chunks, err := extractFunctions(src, cfg.lang, cfg.nodeType)
+	if err != nil {
+		log.Printf("Parse error %s: %v", path, err)
+		return nil
+	}
+	if len(chunks) == 0 {
+		log.Printf("No functions found in %s", path)
+		return nil
+	}
+	baseURL, err := url.Parse(viper.GetString("OllamaHost"))
+	if err != nil {
+		return fmt.Errorf("parse OLLAMA_HOST: %w", err)
+	}
+	client := api.NewClient(baseURL, http.DefaultClient)
+	for i, chunk := range chunks {
+		sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+		sp.Suffix = fmt.Sprintf(" %s chunk %d/%d reviewing...", path, i+1, len(chunks))
+		sp.Start()
+		res, err := reviewChunk(client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
+		sp.Stop()
+		if err != nil {
+			log.Printf("Review error %s[%d]: %v", path, i+1, err)
+			continue
+		}
+		log.Printf("%s chunk %d/%d reviewed", path, i+1, len(chunks))
+		log.Println(res)
+		*report = append(*report, fmt.Sprintf("## %s (chunk %d/%d)\n\n%s\n\n---\n", path, i+1, len(chunks), res))
+	}
+	return nil
+}
+
 // Review はリポジトリ内を探索し、各ファイルの関数単位で AI にレビューを
 // 依頼するメイン関数。取得した結果は Markdown として保存される。
 func Review(repoRoot string, outFile string) error {
@@ -165,71 +210,32 @@ func Review(repoRoot string, outFile string) error {
 	// レビュー結果を格納するスライス
 	var report []string
 
-	// WalkDir に渡すコールバック
-	walkFn := func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// パーミッションエラー等が発生した場合はそのまま返す
+	info, err := os.Stat(repoRoot)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		walkFn := func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				// パーミッションエラー等が発生した場合はそのまま返す
+				return err
+			}
+			if d.IsDir() {
+				if _, ok := ignoreDirs[d.Name()]; ok && path != rootDir {
+					// 指定されたディレクトリは探索しない
+					return fs.SkipDir
+				}
+				return nil
+			}
+			return processFile(path, &report, model, guidelinePath)
+		}
+		if err := filepath.WalkDir(repoRoot, walkFn); err != nil {
 			return err
 		}
-		if d.IsDir() {
-			if _, ok := ignoreDirs[d.Name()]; ok && path != rootDir {
-				// 指定されたディレクトリは探索しない
-				return fs.SkipDir
-			}
-			return nil
+	} else {
+		if err := processFile(repoRoot, &report, model, guidelinePath); err != nil {
+			return err
 		}
-		ext := filepath.Ext(path)
-		cfg, ok := langConfig[ext]
-		if !ok {
-			return nil
-		}
-		log.Printf("Processing %s", path)
-		// 対象ファイルを読み込む
-		src, err := os.ReadFile(path)
-		if err != nil {
-			log.Printf("Read error %s: %v", path, err)
-			return nil
-		}
-		// Tree-sitter により関数チャンクを抽出
-		chunks, err := extractFunctions(src, cfg.lang, cfg.nodeType)
-		if err != nil {
-			log.Printf("Parse error %s: %v", path, err)
-			return nil
-		}
-		if len(chunks) == 0 {
-			log.Printf("No functions found in %s", path)
-			return nil
-		}
-
-		// Ollama サーバーの URL を取得
-		baseURL, err := url.Parse(viper.GetString("OllamaHost"))
-		if err != nil {
-			return fmt.Errorf("parse OLLAMA_HOST: %w", err)
-		}
-
-		client := api.NewClient(baseURL, http.DefaultClient)
-
-		// 抽出したチャンクを順番にレビュー
-		for i, chunk := range chunks {
-			sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-			sp.Suffix = fmt.Sprintf(" %s chunk %d/%d reviewing...", path, i+1, len(chunks))
-			sp.Start()
-			res, err := reviewChunk(client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
-			sp.Stop()
-			if err != nil {
-				log.Printf("Review error %s[%d]: %v", path, i+1, err)
-				continue
-			}
-			log.Printf("%s chunk %d/%d reviewed", path, i+1, len(chunks))
-			log.Println(res)
-			report = append(report,
-				fmt.Sprintf("## %s (chunk %d/%d)\n\n%s\n\n---\n",
-					path, i+1, len(chunks), res))
-		}
-		return nil
-	}
-	if err := filepath.WalkDir(repoRoot, walkFn); err != nil {
-		return err
 	}
 	// まとめたレポートを Markdown ファイルへ出力
 	if err := os.WriteFile(outFile,
