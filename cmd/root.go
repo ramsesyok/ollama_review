@@ -33,26 +33,19 @@ import (
 var cfgFile string
 var repository string
 
-// rootCmd represents the base command when called without any subcommands
+// rootCmd はサブコマンドなしで実行された際の基点となるコマンド
 var rootCmd = &cobra.Command{
 	Use:   "ollama_review",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
+	Short: "Ollama を利用したコードレビュー CLI",
+	Long: `Ollama と Tree-sitter を利用してソースコードを解析し、
+AI によるレビュー結果を出力するツールです。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		output := viper.GetString("output")
 		Review(repository, output)
 	},
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
+// Execute は rootCmd にサブコマンドを登録して実行する
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
@@ -63,37 +56,33 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
+	// 設定ファイルのパスを指定するフラグ
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "config.yaml", "config file (default is config.yaml)")
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
+	// レビュー対象リポジトリを指定するフラグ
 	rootCmd.Flags().StringVarP(&repository, "repository", "r", "", "Select code review targets.")
 }
 
-// initConfig reads in config file and ENV variables if set.
+// initConfig は設定ファイルと環境変数を読み込む
 func initConfig() {
 	if cfgFile != "" {
-		// Use config file from the flag.
+		// フラグで指定された設定ファイルを使用
 		viper.SetConfigFile(cfgFile)
 	} else {
-		// Find home directory.
+		// 実行ファイルのディレクトリから設定ファイルを探索
 		exec, err := os.Executable()
 		cobra.CheckErr(err)
 		exeDir := filepath.Dir(exec)
 
-		// Search config in home directory with name ".ollama_review" (without extension).
+		// ".ollama_review" という名前の YAML を探す
 		viper.AddConfigPath(exeDir)
 		viper.SetConfigType("yaml")
 		viper.SetConfigName(".ollama_review")
 	}
 
-	viper.AutomaticEnv() // read in environment variables that match
+	viper.AutomaticEnv() // 環境変数を自動的に読み込む
 
-	// If a config file is found, read it in.
+	// 設定ファイルが存在する場合は読み込む
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
