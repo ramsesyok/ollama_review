@@ -33,7 +33,9 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
+	"github.com/briandowns/spinner"
 	"github.com/ollama/ollama/api"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/cpp"
@@ -209,7 +211,11 @@ func Review(repoRoot string, outFile string) error {
 
 		// 抽出したチャンクを順番にレビュー
 		for i, chunk := range chunks {
+			sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+			sp.Suffix = fmt.Sprintf(" %s chunk %d/%d reviewing...", path, i+1, len(chunks))
+			sp.Start()
 			res, err := reviewChunk(client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
+			sp.Stop()
 			if err != nil {
 				log.Printf("Review error %s[%d]: %v", path, i+1, err)
 				continue
