@@ -32,6 +32,7 @@ import (
 
 var cfgFile string
 var repository string
+var source string
 
 // rootCmd はサブコマンドなしで実行された際の基点となるコマンド
 var rootCmd = &cobra.Command{
@@ -41,7 +42,11 @@ var rootCmd = &cobra.Command{
 AI によるレビュー結果を出力するツールです。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		output := viper.GetString("output")
-		cobra.CheckErr(Review(repository, output))
+		if source != "" {
+			cobra.CheckErr(Review(source, output))
+		} else {
+			cobra.CheckErr(Review(repository, output))
+		}
 	},
 }
 
@@ -60,6 +65,8 @@ func init() {
 
 	// レビュー対象リポジトリを指定するフラグ
 	rootCmd.Flags().StringVarP(&repository, "repository", "r", "", "Select code review targets.")
+	// 個別のソースファイルを指定するフラグ
+	rootCmd.Flags().StringVarP(&source, "source", "s", "", "Specify single source file for review")
 }
 
 // initConfig は設定ファイルと環境変数を読み込む
