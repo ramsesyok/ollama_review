@@ -43,6 +43,7 @@ import (
 	"github.com/spf13/viper"
 )
 
+// langConfig associates file extensions with tree-sitter configuration.
 var langConfig = map[string]struct {
 	lang     *sitter.Language
 	nodeType string
@@ -55,14 +56,14 @@ var langConfig = map[string]struct {
 	".go":   {golang.GetLanguage(), "function_declaration"},
 }
 
-// 関数ノードを抽出
-func extractFunctions(src []byte, lang *sitter.Language, nodeType string) [][]byte {
+// extractFunctions parses the given source and returns each function body.
+func extractFunctions(src []byte, lang *sitter.Language, nodeType string) ([][]byte, error) {
 	parser := sitter.NewParser()
 	defer parser.Close()
 	parser.SetLanguage(lang)
 	tree, err := parser.ParseCtx(context.Background(), nil, src)
 	if err != nil {
-		return [][]byte{}
+		return nil, fmt.Errorf("parse source: %w", err)
 	}
 
 	root := tree.RootNode()
@@ -77,22 +78,35 @@ func extractFunctions(src []byte, lang *sitter.Language, nodeType string) [][]by
 		}
 	}
 	walk(root)
-	return chunks
+	return chunks, nil
+}
+
+// buildPrompt generates the prompt from the guideline template.
+func buildPrompt(tmplPath, lang string, code []byte) (string, error) {
+	tmpl, err := template.ParseFiles(tmplPath)
+	if err != nil {
+		return "", fmt.Errorf("parse template: %w", err)
+	}
+
+	data := map[string]string{
+		"lang": lang,
+		"code": string(code),
+	}
+
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("execute template: %w", err)
+	}
+
+	return buf.String(), nil
 }
 
 // Ollama にレビュー依頼
-func reviewChunk(client *api.Client, model string, guideline, lang string, code []byte) (string, error) {
-
-	writer := new(strings.Builder)
-	if tmpl, err := template.New(guideline).ParseFiles(guideline); err != nil {
+func reviewChunk(client *api.Client, model string, guideline string, lang string, code []byte) (string, error) {
+	prompt, err := buildPrompt(guideline, lang, code)
+	if err != nil {
 		return "", err
-	} else {
-		variable := map[string]string{"lang": lang, "code": string(code)}
-		if err := tmpl.Execute(writer, variable); err != nil {
-			return "", err
-		}
 	}
-	prompt := writer.String()
 
 	// Chat リクエストを作成
 	req := &api.ChatRequest{
@@ -102,31 +116,32 @@ func reviewChunk(client *api.Client, model string, guideline, lang string, code 
 
 	var outBuf bytes.Buffer
 	// 非ストリーミングで取得
-	err := client.Chat(context.Background(), req, func(resp api.ChatResponse) error {
+	err = client.Chat(context.Background(), req, func(resp api.ChatResponse) error {
 		outBuf.WriteString(resp.Message.Content)
 		return nil
 	})
-	return outBuf.String(), err
+	if err != nil {
+		return "", err
+	}
+	return outBuf.String(), nil
 }
 
-func Review(repoRoot string, outFile string) {
-
-	root := "."
+func Review(repoRoot string, outFile string) error {
+	rootDir := "."
 	model := viper.GetString("model")
-	ignoreNames := map[string]struct{}{}
-	exclude := viper.GetStringSlice("exclude")
-	guideline := viper.GetString("guideline")
-	for _, n := range exclude {
-		ignoreNames[n] = struct{}{}
+	ignoreDirs := map[string]struct{}{}
+	for _, n := range viper.GetStringSlice("exclude") {
+		ignoreDirs[n] = struct{}{}
 	}
+	guidelinePath := viper.GetString("guideline")
+
 	var report []string
-	// リポジトリ内を再帰走査
-	filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+	walkFn := func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err // パーミッションエラー等
 		}
 		if d.IsDir() {
-			if _, ok := ignoreNames[d.Name()]; ok && path != root {
+			if _, ok := ignoreDirs[d.Name()]; ok && path != rootDir {
 				// このディレクトリ配下は潜らない
 				return fs.SkipDir
 			}
@@ -144,7 +159,11 @@ func Review(repoRoot string, outFile string) {
 			return nil
 		}
 		// 関数チャンク抽出（Tree‑sitter）:contentReference[oaicite:1]{index=1}
-		chunks := extractFunctions(src, cfg.lang, cfg.nodeType)
+		chunks, err := extractFunctions(src, cfg.lang, cfg.nodeType)
+		if err != nil {
+			log.Printf("Parse error %s: %v", path, err)
+			return nil
+		}
 		if len(chunks) == 0 {
 			return nil
 		}
@@ -152,15 +171,14 @@ func Review(repoRoot string, outFile string) {
 		// 2. URL をパース
 		baseURL, err := url.Parse(viper.GetString("OllamaHost"))
 		if err != nil {
-			log.Fatalf("OLLAMA_HOST の URL パースエラー: %v", err)
+			return fmt.Errorf("parse OLLAMA_HOST: %w", err)
 		}
 
-		// 3. NewClient で環境変数に頼らずクライアント生成 :contentReference[oaicite:0]{index=0}
 		client := api.NewClient(baseURL, http.DefaultClient)
 
 		// ファイルごとにチャンクをレビュー
 		for i, chunk := range chunks {
-			res, err := reviewChunk(client, model, guideline, strings.TrimPrefix(ext, "."), chunk)
+			res, err := reviewChunk(client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
 			if err != nil {
 				log.Printf("Review error %s[%d]: %v", path, i+1, err)
 				continue
@@ -171,15 +189,17 @@ func Review(repoRoot string, outFile string) {
 					path, i+1, len(chunks), res))
 		}
 		return nil
-	})
-
+	}
+	if err := filepath.WalkDir(repoRoot, walkFn); err != nil {
+		return err
+	}
 	// レポートを Markdown ファイルに出力
-	err := os.WriteFile(outFile,
+	if err := os.WriteFile(outFile,
 		[]byte("# Code Review Report\n\n"+strings.Join(report, "")),
-		0644)
-	if err != nil {
-		log.Fatalf("Failed to write report: %v", err)
+		0644); err != nil {
+		return fmt.Errorf("write report: %w", err)
 	}
 
 	fmt.Printf("Review completed: %s\n", outFile)
+	return nil
 }
