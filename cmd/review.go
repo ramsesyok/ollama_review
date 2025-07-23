@@ -146,6 +146,7 @@ func reviewChunk(client *api.Client, model string, guideline string, lang string
 // Review はリポジトリ内を探索し、各ファイルの関数単位で AI にレビューを
 // 依頼するメイン関数。取得した結果は Markdown として保存される。
 func Review(repoRoot string, outFile string) error {
+	log.Printf("Start review: repo=%s", repoRoot)
 	rootDir := "." // WalkDir の起点
 
 	// 使用するモデル名を設定ファイルから取得
@@ -180,6 +181,7 @@ func Review(repoRoot string, outFile string) error {
 		if !ok {
 			return nil
 		}
+		log.Printf("Processing %s", path)
 		// 対象ファイルを読み込む
 		src, err := os.ReadFile(path)
 		if err != nil {
@@ -193,6 +195,7 @@ func Review(repoRoot string, outFile string) error {
 			return nil
 		}
 		if len(chunks) == 0 {
+			log.Printf("No functions found in %s", path)
 			return nil
 		}
 
@@ -211,7 +214,8 @@ func Review(repoRoot string, outFile string) error {
 				log.Printf("Review error %s[%d]: %v", path, i+1, err)
 				continue
 			}
-			fmt.Println(res)
+			log.Printf("%s chunk %d/%d reviewed", path, i+1, len(chunks))
+			log.Println(res)
 			report = append(report,
 				fmt.Sprintf("## %s (chunk %d/%d)\n\n%s\n\n---\n",
 					path, i+1, len(chunks), res))
@@ -228,7 +232,7 @@ func Review(repoRoot string, outFile string) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 
-	// 標準出力にも完了を通知
-	fmt.Printf("Review completed: %s\n", outFile)
+	log.Printf("Report saved: %s", outFile)
+	log.Printf("Review completed: %s", outFile)
 	return nil
 }
