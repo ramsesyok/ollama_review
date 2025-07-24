@@ -22,10 +22,16 @@ THE SOFTWARE.
 package cmd
 
 import (
+	"context"
+	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/ollama/ollama/api"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -41,6 +47,7 @@ var rootCmd = &cobra.Command{
 	Long: `Ollama と Tree-sitter を利用してソースコードを解析し、
 AI によるレビュー結果を出力するツールです。`,
 	Run: func(cmd *cobra.Command, args []string) {
+		cobra.CheckErr(ensureModel())
 		output := viper.GetString("output")
 		if source != "" {
 			cobra.CheckErr(Review(source, output))
@@ -92,4 +99,45 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		log.Printf("Using config file: %s", viper.ConfigFileUsed())
 	}
+}
+
+// ensureModel checks if the model configured in "model" exists locally.
+// If the model is missing, it prompts the user to download it using the
+// Ollama API. When the user declines, an error is returned and the
+// application exits via cobra.CheckErr.
+func ensureModel() error {
+	model := viper.GetString("model")
+	if model == "" {
+		return fmt.Errorf("model is not specified")
+	}
+	baseURL, err := url.Parse(viper.GetString("OllamaHost"))
+	if err != nil {
+		return fmt.Errorf("parse OllamaHost: %w", err)
+	}
+	client := api.NewClient(baseURL, http.DefaultClient)
+	list, err := client.List(context.Background())
+	if err != nil {
+		return fmt.Errorf("list models: %w", err)
+	}
+	for _, m := range list.Models {
+		if m.Name == model {
+			return nil
+		}
+	}
+	fmt.Printf("Model %s not found. Pull now? [y/N]: ", model)
+	var ans string
+	fmt.Scanln(&ans)
+	if strings.ToLower(strings.TrimSpace(ans)) != "y" {
+		return fmt.Errorf("required model %s not available", model)
+	}
+	err = client.Pull(context.Background(), &api.PullRequest{Name: model}, func(pr api.ProgressResponse) error {
+		if pr.Status != "" {
+			log.Println(pr.Status)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("pull model: %w", err)
+	}
+	return nil
 }
