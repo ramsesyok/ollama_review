@@ -53,21 +53,29 @@ import (
 // lang は解析に用いる言語定義、nodeType は関数ノードの種類を表す。
 // 対応言語を追加する際はここへ設定を追記するだけでよい。
 var langConfig = map[string]struct {
-	lang     *sitter.Language
-	nodeType string
+	lang      *sitter.Language
+	nodeType  string
+	nameField string
 }{
-	".py":   {python.GetLanguage(), "function_definition"},
-	".java": {java.GetLanguage(), "method_declaration"},
-	".cpp":  {cpp.GetLanguage(), "function_definition"},
-	".hpp":  {cpp.GetLanguage(), "function_definition"},
-	".h":    {cpp.GetLanguage(), "function_definition"},
-	".go":   {golang.GetLanguage(), "function_declaration"},
+	".py":   {python.GetLanguage(), "function_definition", "name"},
+	".java": {java.GetLanguage(), "method_declaration", "name"},
+	".cpp":  {cpp.GetLanguage(), "function_definition", "declarator"},
+	".hpp":  {cpp.GetLanguage(), "function_definition", "declarator"},
+	".h":    {cpp.GetLanguage(), "function_definition", "declarator"},
+	".go":   {golang.GetLanguage(), "function_declaration", "name"},
+}
+
+// functionInfo represents a single function extracted from source code.
+// Name holds the function's identifier and Code contains its source snippet.
+type functionInfo struct {
+	Name string
+	Code []byte
 }
 
 // extractFunctions は Tree-sitter を利用してソースから関数ブロックのみを
-// 抽出するヘルパー。言語定義とノード種別を受け取り、再帰的に構文木を探索
-// して対象ノードのコード片を返す。
-func extractFunctions(src []byte, lang *sitter.Language, nodeType string) ([][]byte, error) {
+// 抽出するヘルパー。言語定義とノード種別、名前取得用フィールド名を受け取り、
+// 再帰的に構文木を探索して対象ノードのコード片と関数名を返す。
+func extractFunctions(src []byte, lang *sitter.Language, nodeType, nameField string) ([]functionInfo, error) {
 	parser := sitter.NewParser() // パーサ生成
 	defer parser.Close()
 	parser.SetLanguage(lang) // 解析対象の言語を設定
@@ -79,20 +87,58 @@ func extractFunctions(src []byte, lang *sitter.Language, nodeType string) ([][]b
 	}
 
 	root := tree.RootNode()
-	var chunks [][]byte
+	var funcs []functionInfo
 	// DFS でノードを走査し関数ノードを収集
 	var walk func(n *sitter.Node)
 	walk = func(n *sitter.Node) {
 		if n.Type() == nodeType {
-			// 関数ノードに該当したらコード片を切り出す
-			chunks = append(chunks, src[n.StartByte():n.EndByte()])
+			name := extractName(n, nameField, src)
+			funcs = append(funcs, functionInfo{
+				Name: name,
+				Code: src[n.StartByte():n.EndByte()],
+			})
 		}
-		for c := n.NamedChild(0); c != nil; c = c.NextNamedSibling() {
-			walk(c)
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			walk(n.NamedChild(i))
 		}
 	}
 	walk(root)
-	return chunks, nil
+	return funcs, nil
+}
+
+// extractName returns the function name using the specified field name.
+// When the field node is complex (e.g., C++ declarator), it searches for the
+// first identifier within that node.
+func extractName(n *sitter.Node, field string, src []byte) string {
+	if field == "" {
+		return ""
+	}
+	m := n.ChildByFieldName(field)
+	if m == nil {
+		return ""
+	}
+	if m.Type() == "identifier" {
+		return m.Content(src)
+	}
+	var id *sitter.Node
+	var walk func(*sitter.Node)
+	walk = func(nn *sitter.Node) {
+		if nn == nil || id != nil {
+			return
+		}
+		if nn.Type() == "identifier" {
+			id = nn
+			return
+		}
+		for i := 0; i < int(nn.NamedChildCount()); i++ {
+			walk(nn.NamedChild(i))
+		}
+	}
+	walk(m)
+	if id != nil {
+		return id.Content(src)
+	}
+	return ""
 }
 
 // buildPrompt はテンプレートファイルを読み込み、言語名とコードを埋め込んだ
@@ -163,12 +209,12 @@ func processFile(ctx context.Context, path string, report *[]string, model, guid
 		log.Printf("Read error %s: %v", path, err)
 		return nil
 	}
-	chunks, err := extractFunctions(src, cfg.lang, cfg.nodeType)
+	funcs, err := extractFunctions(src, cfg.lang, cfg.nodeType, cfg.nameField)
 	if err != nil {
 		log.Printf("Parse error %s: %v", path, err)
 		return nil
 	}
-	if len(chunks) == 0 {
+	if len(funcs) == 0 {
 		log.Printf("No functions found in %s", path)
 		return nil
 	}
@@ -177,22 +223,22 @@ func processFile(ctx context.Context, path string, report *[]string, model, guid
 		return fmt.Errorf("parse OLLAMA_HOST: %w", err)
 	}
 	client := api.NewClient(baseURL, http.DefaultClient)
-	for i, chunk := range chunks {
+	for i, fn := range funcs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
-		sp.Suffix = fmt.Sprintf(" %s chunk %d/%d reviewing...", path, i+1, len(chunks))
+		sp.Suffix = fmt.Sprintf(" %s[%s] chunk %d/%d reviewing...", path, fn.Name, i+1, len(funcs))
 		sp.Start()
-		res, err := reviewChunk(ctx, client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
+		res, err := reviewChunk(ctx, client, model, guidelinePath, strings.TrimPrefix(ext, "."), fn.Code)
 		sp.Stop()
 		if err != nil {
 			log.Printf("Review error %s[%d]: %v", path, i+1, err)
 			continue
 		}
-		log.Printf("%s chunk %d/%d reviewed", path, i+1, len(chunks))
+		log.Printf("%s chunk %d/%d reviewed", path, i+1, len(funcs))
 		log.Println(res)
-		*report = append(*report, fmt.Sprintf("## %s (chunk %d/%d)\n\n%s\n\n---\n", path, i+1, len(chunks), res))
+		*report = append(*report, fmt.Sprintf("## %s - %s (chunk %d/%d)\n\n%s\n\n---\n", path, fn.Name, i+1, len(funcs), res))
 	}
 	return nil
 }
