@@ -23,13 +23,16 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/ollama/ollama/api"
 	"github.com/spf13/cobra"
@@ -48,11 +51,18 @@ var rootCmd = &cobra.Command{
 AI によるレビュー結果を出力するツールです。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cobra.CheckErr(ensureModel())
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
 		output := viper.GetString("output")
+		var err error
 		if source != "" {
-			cobra.CheckErr(Review(source, output))
+			err = Review(ctx, source, output)
 		} else {
-			cobra.CheckErr(Review(repository, output))
+			err = Review(ctx, repository, output)
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			cobra.CheckErr(err)
 		}
 	},
 }

@@ -24,6 +24,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -120,7 +121,7 @@ func buildPrompt(tmplPath, lang string, code []byte) (string, error) {
 
 // reviewChunk は 1 つのチャンクを Ollama に送信し、レビュー結果を取得する
 // ヘルパー関数。
-func reviewChunk(client *api.Client, model string, guideline string, lang string, code []byte) (string, error) {
+func reviewChunk(ctx context.Context, client *api.Client, model string, guideline string, lang string, code []byte) (string, error) {
 	// プロンプトの生成
 	prompt, err := buildPrompt(guideline, lang, code)
 	if err != nil {
@@ -135,7 +136,7 @@ func reviewChunk(client *api.Client, model string, guideline string, lang string
 
 	var outBuf bytes.Buffer
 	// ストリームをまとめてバッファに蓄積する
-	err = client.Chat(context.Background(), req, func(resp api.ChatResponse) error {
+	err = client.Chat(ctx, req, func(resp api.ChatResponse) error {
 		outBuf.WriteString(resp.Message.Content)
 		return nil
 	})
@@ -146,7 +147,10 @@ func reviewChunk(client *api.Client, model string, guideline string, lang string
 }
 
 // processFile は単一ファイルを解析してレビュー結果を report に追記するヘルパー。
-func processFile(path string, report *[]string, model, guidelinePath string) error {
+func processFile(ctx context.Context, path string, report *[]string, model, guidelinePath string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	ext := filepath.Ext(path)
 	cfg, ok := langConfig[ext]
 	if !ok {
@@ -174,10 +178,13 @@ func processFile(path string, report *[]string, model, guidelinePath string) err
 	}
 	client := api.NewClient(baseURL, http.DefaultClient)
 	for i, chunk := range chunks {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 		sp.Suffix = fmt.Sprintf(" %s chunk %d/%d reviewing...", path, i+1, len(chunks))
 		sp.Start()
-		res, err := reviewChunk(client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
+		res, err := reviewChunk(ctx, client, model, guidelinePath, strings.TrimPrefix(ext, "."), chunk)
 		sp.Stop()
 		if err != nil {
 			log.Printf("Review error %s[%d]: %v", path, i+1, err)
@@ -192,7 +199,7 @@ func processFile(path string, report *[]string, model, guidelinePath string) err
 
 // Review はリポジトリ内を探索し、各ファイルの関数単位で AI にレビューを
 // 依頼するメイン関数。取得した結果は Markdown として保存される。
-func Review(repoRoot string, outFile string) error {
+func Review(ctx context.Context, repoRoot string, outFile string) error {
 	log.Printf("Start review: repo=%s", repoRoot)
 	rootDir := "." // WalkDir の起点
 
@@ -220,6 +227,9 @@ func Review(repoRoot string, outFile string) error {
 				// パーミッションエラー等が発生した場合はそのまま返す
 				return err
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if d.IsDir() {
 				if _, ok := ignoreDirs[d.Name()]; ok && path != rootDir {
 					// 指定されたディレクトリは探索しない
@@ -227,13 +237,13 @@ func Review(repoRoot string, outFile string) error {
 				}
 				return nil
 			}
-			return processFile(path, &report, model, guidelinePath)
+			return processFile(ctx, path, &report, model, guidelinePath)
 		}
-		if err := filepath.WalkDir(repoRoot, walkFn); err != nil {
+		if err := filepath.WalkDir(repoRoot, walkFn); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 	} else {
-		if err := processFile(repoRoot, &report, model, guidelinePath); err != nil {
+		if err := processFile(ctx, repoRoot, &report, model, guidelinePath); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 	}
@@ -246,5 +256,5 @@ func Review(repoRoot string, outFile string) error {
 
 	log.Printf("Report saved: %s", outFile)
 	log.Printf("Review completed: %s", outFile)
-	return nil
+	return ctx.Err()
 }
